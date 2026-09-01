@@ -132,6 +132,7 @@ class AIMailApp(rumps.App):
         )
         self.summary_text = ""
         self.last_summary_time = ""
+        self._running_tasks = set()  # 防重复执行
         self._update_unread_count()
 
         # 构建菜单
@@ -139,6 +140,21 @@ class AIMailApp(rumps.App):
 
         # 启动定时调度
         self._start_scheduler()
+
+    def _try_start_task(self, task_name):
+        """尝试启动任务，返回 True 表示可以执行，False 表示已在运行"""
+        if task_name in self._running_tasks:
+            subprocess.run([
+                'osascript', '-e',
+                f'display notification "请稍等，上一个操作还在执行中" with title "AI Mail"'
+            ])
+            return False
+        self._running_tasks.add(task_name)
+        return True
+
+    def _finish_task(self, task_name):
+        """标记任务完成"""
+        self._running_tasks.discard(task_name)
 
     def _build_menu(self):
         """构建菜单栏下拉菜单"""
@@ -210,6 +226,17 @@ class AIMailApp(rumps.App):
             cur += interval * 60
         return times
 
+    def _get_auto_show_times(self):
+        """获取需要自动打开窗口的时间点列表
+
+        返回 list of "HH:MM" 字符串
+        """
+        schedule = self._get_schedule_config()
+        auto_show = schedule.get("auto_show_times", [])
+        if isinstance(auto_show, str):
+            auto_show = [auto_show]
+        return auto_show
+
     def _start_scheduler(self):
         """启动定时任务"""
         def scheduler_loop():
@@ -224,6 +251,7 @@ class AIMailApp(rumps.App):
                     # 计算今天的提醒时间点
                     schedule_times = self._get_schedule_times()
                     should_run = False
+                    trigger_time = None
                     for (h, m) in schedule_times:
                         run_key = f"{today_key_prefix}-{h:02d}"
                         # 在当前时间之前或刚好到点（±2分钟窗口）且未跑过
@@ -231,10 +259,14 @@ class AIMailApp(rumps.App):
                             if last_run_key != run_key:
                                 should_run = True
                                 last_run_key = run_key
+                                trigger_time = f"{h:02d}:{m:02d}"
                                 break
 
                     if should_run:
-                        self._run_scheduled_task()
+                        # 检查是否需要自动打开窗口
+                        auto_show_times = self._get_auto_show_times()
+                        auto_show_window = trigger_time in auto_show_times
+                        self._run_scheduled_task(auto_show_window=auto_show_window)
 
                     # 自动删除（每次循环都检查）
                     self._run_auto_delete()
@@ -269,8 +301,12 @@ class AIMailApp(rumps.App):
         except Exception as e:
             print(f"Auto delete error: {e}")
 
-    def _run_scheduled_task(self):
-        """执行定时总结任务"""
+    def _run_scheduled_task(self, auto_show_window=False):
+        """执行定时总结任务
+
+        Args:
+            auto_show_window: 是否自动打开浏览器窗口显示总结
+        """
         try:
             mail_config = ai_engine.get_mail_config()
             max_emails = mail_config.get("max_emails_per_summary", 20)
@@ -291,6 +327,10 @@ class AIMailApp(rumps.App):
                     message=summary[:200] + ("..." if len(summary) > 200 else "")
                 )
 
+                # 如果配置了自动打开窗口，则打开浏览器显示总结
+                if auto_show_window:
+                    summary_window.show(summary)
+
             self._update_unread_count()
         except Exception as e:
             print(f"Scheduled task error: {e}")
@@ -298,14 +338,27 @@ class AIMailApp(rumps.App):
     @rumps.clicked("📬 最新摘要（通知）")
     def _show_summary(self, _):
         """显示上次总结结果（右上角通知）"""
+        import os
+        with open('/tmp/ai_mail_debug.log', 'a') as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] _show_summary 被调用, summary_text长度: {len(self.summary_text)}\n")
+
         if self.summary_text:
-            rumps.notification(
-                title=f"📬 最新摘要 ({self.last_summary_time})",
-                subtitle="",
-                message=self.summary_text[:200] + ("..." if len(self.summary_text) > 200 else "")
-            )
+            # 用 osascript 显示通知（更可靠）
+            msg = self.summary_text[:200] + ("..." if len(self.summary_text) > 200 else "")
+            msg_escaped = msg.replace('"', '\\"')
+            subprocess.run([
+                'osascript', '-e',
+                f'display notification "{msg_escaped}" with title "📬 最新摘要 ({self.last_summary_time})"'
+            ])
+            with open('/tmp/ai_mail_debug.log', 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] osascript 通知已发送\n")
         else:
-            rumps.notification("AI Mail", "暂无摘要", "请先点击「立即总结」")
+            subprocess.run([
+                'osascript', '-e',
+                'display notification "请先点击「立即总结」" with title "AI Mail" subtitle "暂无摘要"'
+            ])
+            with open('/tmp/ai_mail_debug.log', 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] 无摘要，osascript 已提示\n")
 
     @rumps.clicked("📋 查看总结（桌面窗口）")
     def _show_summary_window(self, _):
@@ -318,7 +371,8 @@ class AIMailApp(rumps.App):
     @rumps.clicked("🔄 立即总结")
     def _do_summarize(self, _):
         """立即执行邮件总结（后台执行）"""
-        import threading
+        if not self._try_start_task("summarize"):
+            return
 
         def do_summary():
             try:
@@ -355,6 +409,8 @@ class AIMailApp(rumps.App):
             except Exception as e:
                 rumps.notification("AI Mail", "❌ 错误", str(e))
                 self._update_unread_count()
+            finally:
+                self._finish_task("summarize")
 
         # 后台线程执行
         threading.Thread(target=do_summary, daemon=True).start()
@@ -362,6 +418,9 @@ class AIMailApp(rumps.App):
     @rumps.clicked("🗑️ 清理指定邮件")
     def _manual_delete(self, _):
         """手动清理配置中指定的邮件（后台执行）"""
+        if not self._try_start_task("delete"):
+            return
+
         # 写入日志文件
         with open('/tmp/ai_mail_debug.log', 'a') as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] _manual_delete 被调用\n")
@@ -452,12 +511,17 @@ class AIMailApp(rumps.App):
                 with open('/tmp/ai_mail_debug.log', 'a') as f:
                     f.write(f"[{time.strftime('%H:%M:%S')}] 异常: {e}\n")
                 rumps.notification("AI Mail", "❌ 错误", str(e))
+            finally:
+                self._finish_task("delete")
 
         threading.Thread(target=do_delete, daemon=True).start()
 
     @rumps.clicked("✏️ AI 写邮件")
     def _compose_email(self, _):
         """AI 写邮件（后台执行）"""
+        if not self._try_start_task("compose"):
+            return
+
         # 用 macOS 原生对话框获取输入（不阻塞菜单）
         try:
             result = subprocess.run(
@@ -465,11 +529,14 @@ class AIMailApp(rumps.App):
                 capture_output=True, text=True, timeout=300
             )
             if result.returncode != 0:
+                self._finish_task("compose")
                 return  # 用户取消
             response = result.stdout.strip()
             if not response:
+                self._finish_task("compose")
                 return
         except Exception:
+            self._finish_task("compose")
             return
 
         def do_compose():
@@ -492,19 +559,26 @@ class AIMailApp(rumps.App):
                 rumps.notification("AI Mail", "✅ 已创建", "草稿已在 Mail 中打开")
             except Exception as e:
                 rumps.notification("AI Mail", "❌ 错误", str(e))
+            finally:
+                self._finish_task("compose")
 
         threading.Thread(target=do_compose, daemon=True).start()
 
     @rumps.clicked("↩️ AI 回复选中邮件")
     def _reply_email(self, _):
         """AI 回复选中邮件（后台执行）"""
+        if not self._try_start_task("reply"):
+            return
+
         try:
             email = mail_reader.get_selected_email()
             if not email:
                 rumps.notification("AI Mail", "提示", "请先在 Mail 中选中一封邮件")
+                self._finish_task("reply")
                 return
         except Exception as e:
             rumps.notification("AI Mail", "错误", str(e))
+            self._finish_task("reply")
             return
 
         def do_reply():
@@ -525,16 +599,22 @@ class AIMailApp(rumps.App):
                 rumps.notification("AI Mail", "✅ 已创建", "回复草稿已在 Mail 中打开")
             except Exception as e:
                 rumps.notification("AI Mail", "❌ 错误", str(e))
+            finally:
+                self._finish_task("reply")
 
         threading.Thread(target=do_reply, daemon=True).start()
 
     @rumps.clicked("✅ 一键全部已读")
     def _mark_all_read(self, _):
         """标记所有邮件已读（后台执行）"""
+        if not self._try_start_task("mark_read"):
+            return
+
         try:
             count = mail_reader.get_unread_count()
             if count == 0:
                 rumps.notification("AI Mail", "提示", "没有未读邮件")
+                self._finish_task("mark_read")
                 return
 
             # 确认对话框（主线程）
@@ -543,10 +623,12 @@ class AIMailApp(rumps.App):
                 capture_output=True, text=True, timeout=300
             )
             if result.returncode != 0:
+                self._finish_task("mark_read")
                 return  # 用户取消
 
         except Exception as e:
             rumps.notification("AI Mail", "错误", str(e))
+            self._finish_task("mark_read")
             return
 
         def do_mark_read():
@@ -560,19 +642,26 @@ class AIMailApp(rumps.App):
                     rumps.notification("AI Mail", "失败", "操作失败，请检查 Mail 权限")
             except Exception as e:
                 rumps.notification("AI Mail", "❌ 错误", str(e))
+            finally:
+                self._finish_task("mark_read")
 
         threading.Thread(target=do_mark_read, daemon=True).start()
 
     @rumps.clicked("📅 添加到日历/提醒")
     def _add_to_calendar(self, _):
         """添加选中邮件到日历/提醒事项（AI 提取在后台执行）"""
+        if not self._try_start_task("calendar"):
+            return
+
         try:
             email = mail_reader.get_selected_email()
             if not email:
                 rumps.notification("AI Mail", "提示", "请先在 Mail 中选中一封邮件")
+                self._finish_task("calendar")
                 return
         except Exception as e:
             rumps.notification("AI Mail", "错误", str(e))
+            self._finish_task("calendar")
             return
 
         def do_extract_and_add():
@@ -598,6 +687,8 @@ class AIMailApp(rumps.App):
 
             except Exception as e:
                 rumps.notification("AI Mail", "❌ 错误", str(e))
+            finally:
+                self._finish_task("calendar")
 
         threading.Thread(target=do_extract_and_add, daemon=True).start()
 

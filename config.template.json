@@ -20,6 +20,8 @@
     "_start_time说明": "每天开始提醒时间，格式 HH:MM",
     "end_time": "19:00",
     "_end_time说明": "每天结束提醒时间，格式 HH:MM（19:00 即晚上 7 点）",
+    "auto_show_times": ["09:00"],
+    "_auto_show_times说明": "这些时间点自动打开浏览器窗口显示总结（格式 HH:MM），其他时间只显示通知。可配置多个如 [\"09:00\", \"15:00\"]",
     "daily_time": "",
     "_daily_time说明": "兼容旧配置，留空即可。以上面的 start_time/end_time/interval_hours 为准"
   },

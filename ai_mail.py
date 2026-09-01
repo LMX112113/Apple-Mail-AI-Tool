@@ -144,7 +144,7 @@ class AIMailApp(rumps.App):
         """构建菜单栏下拉菜单"""
         self.menu = [
             rumps.MenuItem("📋 查看总结（桌面窗口）", callback=self._show_summary_window),
-            rumps.MenuItem("📬 最新摘要（弹窗）", callback=self._show_summary),
+            rumps.MenuItem("📬 最新摘要（通知）", callback=self._show_summary),
             rumps.MenuItem("🔄 立即总结", callback=self._do_summarize),
             None,  # 分割线
             rumps.MenuItem("🗑️ 清理指定邮件", callback=self._manual_delete),
@@ -167,73 +167,145 @@ class AIMailApp(rumps.App):
         except Exception:
             self.title = "📬"
 
+    def _get_schedule_config(self):
+        """读取定时调度配置"""
+        config_path = os.path.expanduser("~/.claude/scripts/ai-mail/config.json")
+        if not os.path.exists(config_path):
+            config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            return config.get("schedule", {})
+        except Exception:
+            return {}
+
+    def _get_schedule_times(self):
+        """根据 start_time / end_time / interval_hours 计算今天所有提醒时间点
+
+        返回 list of (hour, minute)
+        """
+        schedule = self._get_schedule_config()
+        interval = schedule.get("interval_hours", 3)
+        start_str = schedule.get("start_time", "09:00")
+        end_str = schedule.get("end_time", "19:00")
+
+        # 兼容旧配置：没有 start_time 时用 daily_time
+        if not start_str:
+            start_str = schedule.get("daily_time", "09:00")
+
+        try:
+            sh, sm = [int(x) for x in start_str.split(":")]
+            eh, em = [int(x) for x in end_str.split(":")]
+        except Exception:
+            sh, sm, eh, em = 9, 0, 19, 0
+
+        if interval <= 0:
+            return []
+
+        times = []
+        cur = sh * 60 + sm
+        end = eh * 60 + em
+        while cur <= end:
+            times.append((cur // 60, cur % 60))
+            cur += interval * 60
+        return times
+
     def _start_scheduler(self):
         """启动定时任务"""
         def scheduler_loop():
+            last_run_key = ""  # "YYYY-MM-DD-HH" 防止同一小时重复跑
+
             while True:
                 try:
-                    # 自动删除指定邮件
-                    filter_config = ai_engine.get_filter_config()
-                    auto_delete_rules = filter_config.get("auto_delete_rules", [])
-                    folders = mail_config.get("folders", ["INBOX"])
+                    now = time.localtime()
+                    now_h, now_m = now.tm_hour, now.tm_min
+                    today_key_prefix = time.strftime("%Y-%m-%d")
 
-                    total_deleted = 0
-                    for rule in auto_delete_rules:
-                        if rule.get("field") == "sender":
-                            pattern = rule.get("contains", "")
-                            if pattern:
-                                deleted = mail_reader.delete_emails_from_sender(pattern, folders)
-                                total_deleted += deleted
+                    # 计算今天的提醒时间点
+                    schedule_times = self._get_schedule_times()
+                    should_run = False
+                    for (h, m) in schedule_times:
+                        run_key = f"{today_key_prefix}-{h:02d}"
+                        # 在当前时间之前或刚好到点（±2分钟窗口）且未跑过
+                        if (h < now_h) or (h == now_h and abs(now_m - m) <= 2):
+                            if last_run_key != run_key:
+                                should_run = True
+                                last_run_key = run_key
+                                break
 
-                    if total_deleted > 0:
-                        rumps.notification("AI Mail", f"🗑️ 已删除 {total_deleted} 封邮件", "自动清理完成")
+                    if should_run:
+                        self._run_scheduled_task()
 
-                    config = ai_engine.get_filter_config()
-                    mail_config = ai_engine.get_mail_config()
-                    max_emails = mail_config.get("max_emails_per_summary", 20)
-
-                    # 获取未读邮件
-                    folders = mail_config.get("folders", ["INBOX"])
-                    emails = mail_reader.get_unread_emails(max_emails, folders)
-                    # 过滤
-                    normal_emails, count_only_emails = ai_engine.filter_emails(emails)
-
-                    if normal_emails or count_only_emails:
-                        # AI 总结
-                        summary = ai_engine.summarize_emails(normal_emails, count_only_emails)
-                        self.summary_text = summary
-                        self.last_summary_time = time.strftime("%H:%M")
-
-                        total_count = len(normal_emails) + len(count_only_emails)
-                        # 推送通知
-                        rumps.notification(
-                            title=f"📬 {total_count}封新邮件摘要",
-                            subtitle=self.last_summary_time,
-                            message=summary[:200] + ("..." if len(summary) > 200 else "")
-                        )
-
-                    # 更新未读计数
-                    self._update_unread_count()
+                    # 自动删除（每次循环都检查）
+                    self._run_auto_delete()
 
                 except Exception as e:
                     print(f"Scheduler error: {e}")
 
-                # 等待间隔（默认 4 小时）
-                time.sleep(4 * 3600)
+                # 每分钟检查一次
+                time.sleep(60)
 
         t = threading.Thread(target=scheduler_loop, daemon=True)
         t.start()
 
-    @rumps.clicked("📬 最新摘要（弹窗）")
+    def _run_auto_delete(self):
+        """执行自动删除规则"""
+        try:
+            filter_config = ai_engine.get_filter_config()
+            auto_delete_rules = filter_config.get("auto_delete_rules", [])
+            mail_config = ai_engine.get_mail_config()
+            folders = mail_config.get("folders", ["INBOX"])
+
+            total_deleted = 0
+            for rule in auto_delete_rules:
+                if rule.get("field") == "sender":
+                    pattern = rule.get("contains", "")
+                    if pattern:
+                        deleted = mail_reader.delete_emails_from_sender(pattern, folders)
+                        total_deleted += deleted
+
+            if total_deleted > 0:
+                rumps.notification("AI Mail", f"🗑️ 已删除 {total_deleted} 封邮件", "自动清理完成")
+        except Exception as e:
+            print(f"Auto delete error: {e}")
+
+    def _run_scheduled_task(self):
+        """执行定时总结任务"""
+        try:
+            mail_config = ai_engine.get_mail_config()
+            max_emails = mail_config.get("max_emails_per_summary", 20)
+            folders = mail_config.get("folders", ["INBOX"])
+
+            emails = mail_reader.get_unread_emails(max_emails, folders)
+            normal_emails, count_only_emails = ai_engine.filter_emails(emails)
+
+            if normal_emails or count_only_emails:
+                summary = ai_engine.summarize_emails(normal_emails, count_only_emails)
+                self.summary_text = summary
+                self.last_summary_time = time.strftime("%H:%M")
+
+                total_count = len(normal_emails) + len(count_only_emails)
+                rumps.notification(
+                    title=f"📬 {total_count}封新邮件摘要",
+                    subtitle=self.last_summary_time,
+                    message=summary[:200] + ("..." if len(summary) > 200 else "")
+                )
+
+            self._update_unread_count()
+        except Exception as e:
+            print(f"Scheduled task error: {e}")
+
+    @rumps.clicked("📬 最新摘要（通知）")
     def _show_summary(self, _):
-        """显示上次总结结果"""
+        """显示上次总结结果（右上角通知）"""
         if self.summary_text:
-            rumps.alert(
-                title=f"最新邮件摘要 ({self.last_summary_time})",
-                message=self.summary_text
+            rumps.notification(
+                title=f"📬 最新摘要 ({self.last_summary_time})",
+                subtitle="",
+                message=self.summary_text[:200] + ("..." if len(self.summary_text) > 200 else "")
             )
         else:
-            rumps.alert(title="暂无摘要", message="请先点击「立即总结」")
+            rumps.notification("AI Mail", "暂无摘要", "请先点击「立即总结」")
 
     @rumps.clicked("📋 查看总结（桌面窗口）")
     def _show_summary_window(self, _):

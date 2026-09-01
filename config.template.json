@@ -14,10 +14,14 @@
 
   "schedule": {
     "_说明": "定时总结配置",
-    "interval_hours": 4,
-    "_interval_hours说明": "自动总结间隔（小时），0 表示不自动总结",
-    "daily_time": "09:00",
-    "_daily_time说明": "每天定时总结时间，格式 HH:MM，留空表示不启用"
+    "interval_hours": 3,
+    "_interval_hours说明": "提醒间隔（小时），与 start_time/end_time 配合使用",
+    "start_time": "09:00",
+    "_start_time说明": "每天开始提醒时间，格式 HH:MM",
+    "end_time": "19:00",
+    "_end_time说明": "每天结束提醒时间，格式 HH:MM（19:00 即晚上 7 点）",
+    "daily_time": "",
+    "_daily_time说明": "兼容旧配置，留空即可。以上面的 start_time/end_time/interval_hours 为准"
   },
 
   "filter": {

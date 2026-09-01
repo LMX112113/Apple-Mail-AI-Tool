@@ -1,0 +1,80 @@
+{
+  "_说明": "Apple Mail AI 增强工具配置文件 - 请将此文件复制为 config.json 并修改配置",
+
+  "api": {
+    "_说明": "AI API 配置",
+    "api_key": "",
+    "_api_key说明": "必填：你的 Anthropic API 密钥，留空则读取环境变量 ANTHROPIC_API_KEY",
+    "model": "claude-3-5-sonnet-20241022",
+    "_model说明": "模型名称，推荐 claude-3-5-sonnet-20241022 或 qwen3.7-plus",
+    "max_tokens": 2000,
+    "base_url": "",
+    "_base_url说明": "API 地址，留空使用默认地址 https://api.anthropic.com"
+  },
+
+  "schedule": {
+    "_说明": "定时总结配置",
+    "interval_hours": 4,
+    "_interval_hours说明": "自动总结间隔（小时），0 表示不自动总结",
+    "daily_time": "09:00",
+    "_daily_time说明": "每天定时总结时间，格式 HH:MM，留空表示不启用"
+  },
+
+  "filter": {
+    "_说明": "邮件过滤规则 - 按顺序匹配，先匹配先生效",
+
+    "auto_delete_rules": [
+      {
+        "_说明": "自动删除规则 - 这些邮件会被定时自动删除（适合无用通知类邮件）",
+        "field": "sender",
+        "_field说明": "匹配字段：sender(发件人) 或 subject(主题)",
+        "contains": "xxx@yyy.com",
+        "_contains说明": "正则表达式，匹配发件人或主题"
+      }
+    ],
+
+    "count_only_rules": [
+      {
+        "_说明": "仅统计规则 - 这些邮件只统计数量，不总结内容（适合通知类、工单类邮件）",
+        "field": "sender",
+        "_field说明": "匹配字段：sender(发件人) 或 subject(主题)",
+        "contains": "xxx@yyy.com|xxx@yyy.com",
+        "_contains说明": "正则表达式，匹配发件人或主题，| 表示或"
+      }
+    ],
+
+    "exclude_rules": [
+      {
+        "_说明": "排除规则 - 完全忽略这些邮件，不统计也不总结",
+        "field": "sender",
+        "contains": "noreply|no-reply|mailer-daemon|postmaster",
+        "_说明2": "系统自动发送的邮件"
+      },
+      {
+        "field": "subject",
+        "contains": "退订|unsubscribe|促销|广告",
+        "_说明2": "营销类邮件"
+      }
+    ],
+
+    "include_rules": [
+      {
+        "_说明": "包含规则 - 默认总结所有其他邮件",
+        "field": "sender",
+        "contains": ".*",
+        "_说明2": ".* 表示匹配所有"
+      }
+    ],
+
+    "custom_prompt": "请用中文简洁总结以下邮件，提取关键信息和待办事项。",
+    "_custom_prompt说明": "自定义总结提示词，可以指定总结的侧重点"
+  },
+
+  "mail": {
+    "_说明": "邮件读取配置",
+    "max_emails_per_summary": 20,
+    "_max_emails_per_summary说明": "每次最多扫描多少封邮件（从新到旧）",
+    "folders": ["INBOX", "yyyy"],
+    "_folders说明": "扫描的邮箱文件夹，可配置多个"
+  }
+}
